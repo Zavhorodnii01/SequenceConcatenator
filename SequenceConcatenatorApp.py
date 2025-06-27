@@ -5,6 +5,7 @@ from tkinter import filedialog, messagebox
 import re
 import os
 import traceback
+from turtledemo.penrose import f
 
 # Assuming SequenceConcatenator.py is in the same directory or accessible in the python path
 try:
@@ -43,29 +44,12 @@ class SequenceConcatenatorApp:
         self.font_mono = ("Courier New", 9)
 
 
-        # --- Menu Bar (Removed as requested in the *previous* image) ---
-        # The menubar creation code has been removed.
-        # menubar = tk.Menu(root)
-        # root.config(menu=menubar)
-        # filemenu = tk.Menu(menubar, tearoff=0)
-        # menubar.add_cascade(label="File", menu=filemenu)
-        # filemenu.add_command(label="Exit", command=root.quit)
-        # importmenu = tk.Menu(menubar, tearoff=0)
-        # menubar.add_cascade(label="Import", menu=importmenu)
-        # importmenu.add_command(label="Import Genes...", command=self.open_add_gene_dialog)
-        # exportmenu = tk.Menu(menubar, tearoff=0)
-        # menubar.add_cascade(label="Export", menu=exportmenu)
-        # exportmenu.add_command(label="Export Concatenated FASTA...", command=self.export_fasta)
-        # exportmenu.add_command(label="Export Partition (NEXUS)...", command=self.export_partition)
-        # exportmenu.add_command(label="Export Full NEXUS...", command=self.export_full_nexus)
+        # --- Menu Bar (Removed) ---
+        # The menubar creation code has been removed as requested previously.
 
 
-        # --- Toolbar (Removed as requested in the *previous* image) ---
-        # The toolbar frame and its buttons have been removed.
-        # toolbar = tk.Frame(root, bg="#dddddd")
-        # toolbar.pack(side="top", fill="x")
-        # ttk.Button(toolbar, text="Delete taxon", command=lambda: self.remove_selected_taxon_from_results()).pack(side="left", padx=2, pady=2)
-        # ttk.Button(toolbar, text="Excise entire taxon", command=lambda: self.excise_entire_taxon_from_results()).pack(side="left", padx=2, pady=2)
+        # --- Toolbar (Removed) ---
+        # The toolbar frame and its buttons have been removed as requested previously.
 
 
         # Notebook (Tabs)
@@ -92,7 +76,16 @@ class SequenceConcatenatorApp:
         # Configure Treeview style
         style.configure("Treeview.Heading", font=self.font_bold, background="#eeeeee", foreground="black")
         style.configure("Treeview", font=self.font_normal, rowheight=20)
-        style.map("Treeview", background=[("selected", self.primary_color)], foreground=[("selected", "white")])
+        style.map("Treeview", background=[("selected", self.primary_color)], foreground=[("selected", "white")],
+                 font=[('selected', self.font_normal)]) # Keep normal font on select unless editing
+
+        # Custom tag for Outgroup row - Apply bold font and different background
+        # Use a different background color when *not* selected to make it stand out
+        style.configure("Treeview.outgroup", font=self.font_bold)
+        style.map("Treeview.outgroup",
+                  background=[("selected", self.primary_color), ('!selected', '#d9d9d9')], # Light gray background when not selected
+                  foreground=[("selected", "white"), ('!selected', "black")], # Black text when not selected
+                  font=[('selected', self.font_bold), ('!selected', self.font_bold)]) # Always bold font for outgroup row
 
 
         for tab_name, tab_frame in self.tabs.items():
@@ -108,9 +101,16 @@ class SequenceConcatenatorApp:
 
         # Store results internally for export and display
         self._concatenated_sequences = None # {taxon_name: sequence_string, ...} -> Keys are potentially edited
-        self._partition_data = None # [(gene_name, 'start-end', gene_type), ...] -> Uses original gene names from backend (now frontend names)
-        self._statistics = None # Dictionary holding various stats, including divergence
+        # Store the SequenceConcatenator instance
+        self._concatenator = None
+        # Store gene info processed by the backend (needed for recalculating divergence)
+        self._backend_gene_info = None
+        self._partition_data = None # [(gene_name, 'start-end', gene_type), ...]
+        self._statistics = None # Dictionary holding various stats, including divergence (initial)
         self._divergence_data = None # {taxon_name: {'Total score': float, 'No of charsets': int, 'ActualGeneName': 'count (perc%)', ...}, ...}
+
+        # Variable to hold the current reference taxon for divergence calculation
+        self._reference_taxon = None
 
         # Variable to hold the Treeview Entry widget for editing (Keeping taxon renaming)
         self.entry_editor = None
@@ -209,7 +209,7 @@ class SequenceConcatenatorApp:
         parent_frame.columnconfigure(0, weight=1)
         parent_frame.rowconfigure(0, weight=0) # Top panes (stats/partition) fixed height
         parent_frame.rowconfigure(1, weight=1) # Divergence table takes main space
-        parent_frame.rowconfigure(2, weight=0) # Export buttons fixed height
+        parent_frame.rowconfigure(2, weight=0) # Buttons fixed height
 
 
         # Frame for Statistics and Partition
@@ -258,7 +258,7 @@ class SequenceConcatenatorApp:
         self.partition_text.config(xscrollcommand=partition_scrollbar_x.set)
 
 
-        # --- Divergence Table (Replaces Sequences Display) ---
+        # --- Divergence Table ---
         divergence_frame = tk.LabelFrame(parent_frame, text="Divergence from Reference Taxon", font=self.font_heading, bg=self.bg_color, fg=self.heading_color, padx=10, pady=5)
         divergence_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         divergence_frame.columnconfigure(0, weight=1)
@@ -288,13 +288,13 @@ class SequenceConcatenatorApp:
         self.divergence_treeview.bind('<ButtonRelease-1>', self._on_treeview_click)
 
 
-        # --- Export Buttons (Restored) ---
-        # Re-added the export buttons frame and its buttons as requested
-        export_btn_frame = tk.Frame(parent_frame, bg=self.bg_color)
-        export_btn_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10), padx=10)
+        # --- Buttons at bottom of Results tab ---
+        button_frame = tk.Frame(parent_frame, bg=self.bg_color)
+        button_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10), padx=10)
 
+        # Re-added Export buttons
         export_fasta_btn = tk.Button(
-            export_btn_frame, text="Export FASTA", command=self.export_fasta,
+            button_frame, text="Export FASTA", command=self.export_fasta,
             bg=self.button_bg_primary, fg=self.button_fg,
             activebackground=self.active_bg_primary, activeforeground=self.button_fg,
             font=self.font_button, bd=0, relief="flat", padx=20, pady=10, cursor="hand2"
@@ -302,7 +302,7 @@ class SequenceConcatenatorApp:
         export_fasta_btn.pack(side="left", padx=(0, 10))
 
         export_partition_btn = tk.Button(
-            export_btn_frame, text="Export Partition (NEXUS block)", command=self.export_partition,
+            button_frame, text="Export Partition (NEXUS block)", command=self.export_partition,
             bg=self.button_bg_primary, fg=self.button_fg,
             activebackground=self.active_bg_primary, activeforeground=self.button_fg,
             font=self.font_button, bd=0, relief="flat", padx=20, pady=10, cursor="hand2"
@@ -310,12 +310,21 @@ class SequenceConcatenatorApp:
         export_partition_btn.pack(side="left", padx=(0, 10))
 
         export_full_nexus_btn = tk.Button(
-             export_btn_frame, text="Export Full NEXUS", command=self.export_full_nexus,
+             button_frame, text="Export Full NEXUS", command=self.export_full_nexus,
              bg=self.button_bg_primary, fg=self.button_fg,
              activebackground=self.active_bg_primary, activeforeground=self.button_fg,
              font=self.font_button, bd=0, relief="flat", padx=20, pady=10, cursor="hand2"
         )
-        export_full_nexus_btn.pack(side="left") # No padx on the last button
+        export_full_nexus_btn.pack(side="left") # No padx on the last button on the left
+
+        # Add the "Make Outgroup" button - placed on the right
+        make_outgroup_btn = tk.Button(
+            button_frame, text="Make Outgroup", command=self.make_selected_taxon_outgroup,
+            bg=self.button_bg_secondary, fg=self.button_fg, # Using secondary color for this action button
+            activebackground=self.active_bg_secondary, activeforeground=self.button_fg,
+            font=self.font_button, bd=0, relief="flat", padx=20, pady=10, cursor="hand2"
+        )
+        make_outgroup_btn.pack(side="right") # Place on the right side
 
 
     # Kept as this is the primary way to add genes
@@ -538,31 +547,53 @@ class SequenceConcatenatorApp:
 
         self.clear_results_display()
         self._treeview_id_to_taxon_name = {} # Clear map for new results
+        self._reference_taxon = None # Reset reference taxon on new analysis
+        self._concatenator = None # Clear previous backend instance
+        self._backend_gene_info = None # Clear previous backend gene info
+
 
         try:
-            # Pass both raw content and the assigned gene names to the backend
-            concatenator = SequenceConcatenator(self.raw_gene_contents, self.gene_names)
+            # Create and store the SequenceConcatenator instance
+            self._concatenator = SequenceConcatenator(self.raw_gene_contents, self.gene_names)
 
-            self._concatenated_sequences = concatenator.get_concatenated_sequences()
-            self._statistics = concatenator.get_statistics()
-            self._partition_data = concatenator.get_partition()
-            self._divergence_data = self._statistics.get("Divergence Data", {}) # _calculate_statistics populates this
+            # Get results from the instance
+            self._concatenated_sequences = self._concatenator.get_concatenated_sequences()
+            self._backend_gene_info = self._concatenator.get_processed_gene_info() # Get processed gene info
+            self._partition_data = self._concatenator.get_partition()
+            # Statistics are calculated by the backend using its default reference (first taxon)
+            self._statistics = self._concatenator.get_statistics()
 
+
+            # Initial divergence data comes from the initial statistics calculation
+            self._divergence_data = self._statistics.get("Divergence Data", {})
 
             if not self._concatenated_sequences:
                  messagebox.showwarning("Concatenation Warning", "No concatenated sequences were produced by the backend. This might happen if no valid data was parsed or there are no common taxa across genes.")
                  self.clear_results_display()
                  return
-            # Check if there are actual divergence values (more than just the reference taxon)
-            if len(self._divergence_data) <= 1 and len(self._concatenated_sequences) > 1:
-                 messagebox.showwarning("Divergence Warning", "Divergence data could not be calculated for multiple taxons. Ensure your data has sufficient overlaps between taxons and genes.")
+
+            # Set the initial reference taxon to the one used by the backend (the first one in the sorted concatenated keys)
+            taxons_in_concat = sorted(list(self._concatenated_sequences.keys()))
+            if taxons_in_concat:
+                 # The backend calculated initial divergence based on the first taxon in its sorted list
+                 self._reference_taxon = taxons_in_concat[0]
+            else:
+                 self._reference_taxon = None # Should not happen if concat_sequences is not empty
 
 
-            # The display_results method already uses the keys from _divergence_data
-            # and populates the columns based on these keys.
-            # Since the backend will now use the correct gene names as keys in divergence_data,
-            # the frontend should display the correct gene names automatically.
-            self.display_results(self._concatenated_sequences, self._statistics, self._partition_data, self._divergence_data)
+            # Check if divergence data seems incomplete when taxons exist
+            if len(taxons_in_concat) > 1 and not self._divergence_data:
+                 messagebox.showwarning("Divergence Warning", "No divergence data was produced by the backend. Ensure your data has sufficient overlaps between taxons and genes.")
+            elif len(taxons_in_concat) > 1 and self._divergence_data and len(self._divergence_data) <= 1:
+                 # This case happens if only the reference taxon's row exists in divergence data
+                 messagebox.showwarning("Divergence Warning", f"Divergence data calculated only for reference taxon '{self._reference_taxon}'. Ensure other taxons have sufficient data.")
+
+
+            # Display the results, including the initial divergence table
+            self.display_results_panels(self._statistics, self._partition_data)
+            # Pass the initial divergence data calculated by the backend
+            self._update_divergence_table_display(self._divergence_data, self._reference_taxon)
+
 
             self.notebook.select(self.tabs["Results"])
 
@@ -571,12 +602,10 @@ class SequenceConcatenatorApp:
             traceback.print_exc()
             self.clear_results_display()
 
-
-    # Kept as it displays the results after analysis
-    def display_results(self, concatenated_sequences, statistics, partition, divergence_data):
-        """Populates the Results tab widgets with data, including the Treeview."""
-
-        # --- Display Statistics ---
+    # New method to handle displaying results panels (Stats and Partition)
+    def display_results_panels(self, statistics, partition):
+        """Populates the Statistics and Partition text areas."""
+         # --- Display Statistics ---
         self.stats_text.config(state="normal")
         self.stats_text.delete("1.0", tk.END)
         self.stats_text.insert(tk.END, "Statistics:\n\n")
@@ -594,7 +623,7 @@ class SequenceConcatenatorApp:
             displayed_keys = set()
 
             for key in preferred_order:
-                 if key in statistics and key != "Divergence Data":
+                 if key in statistics and key != "Divergence Data": # Exclude divergence data from stats text area
                       value = statistics[key]
                       if isinstance(value, dict):
                           self.stats_text.insert(tk.END, f"{key}:\n")
@@ -638,17 +667,18 @@ class SequenceConcatenatorApp:
         self.partition_text.config(state="normal")
         self.partition_text.delete("1.0", tk.END)
         self.partition_text.insert(tk.END, "Partition (NEXUS format example):\n\n")
-        if partition and concatenated_sequences: # Need sequences to get NTAX/NCHAR
+        if partition and self._concatenated_sequences: # Need sequences to get NTAX/NCHAR
              self.partition_text.insert(tk.END, "#nexus\n\n")
 
-             num_taxa = len(concatenated_sequences)
-             seq_len = len(next(iter(concatenated_sequences.values()))) if concatenated_sequences else 0
+             num_taxa = len(self._concatenated_sequences)
+             seq_len = len(next(iter(self._concatenated_sequences.values()))) if self._concatenated_sequences else 0
 
              if num_taxa > 0 and seq_len > 0:
                   self.partition_text.insert(tk.END, "BEGIN DATA;\n")
                   self.partition_text.insert(tk.END, f"  DIMENSIONS NTAX={num_taxa} NCHAR={seq_len};\n")
                   datatypes = set(item[2] for item in partition if item[2] != 'Unknown')
                   if 'DNA' in datatypes and 'Protein' in datatypes:
+                       # Corrected f.write to use self.partition_text.insert
                        self.partition_text.insert(tk.END, "  FORMAT DATATYPE=DNA MISSING=- GAP=-;\n  [ WARNING: Mixed DNA/Protein data, DATATYPE=DNA may be unsuitable. ]\n")
                   elif 'Protein' in datatypes:
                        self.partition_text.insert(tk.END, "  FORMAT DATATYPE=Protein MISSING=- GAP=-;\n")
@@ -774,19 +804,21 @@ class SequenceConcatenatorApp:
 
              self.partition_text.insert(tk.END, "END; [mrbayes]\n")
 
-
         else:
              self.partition_text.insert(tk.END, "No partition data available from backend or no concatenated sequences.\n")
         self.partition_text.config(state="disabled")
 
 
-        # --- Display Divergence Table ---
+    # New method to update ONLY the divergence table display
+    def _update_divergence_table_display(self, divergence_data, reference_taxon):
+        """Updates the divergence table Treeview with data."""
+
         # Clear existing columns and data
         if self.divergence_treeview["columns"]:
              self.divergence_treeview["columns"] = ()
 
         self.divergence_treeview.delete(*self.divergence_treeview.get_children())
-        self._treeview_id_to_taxon_name = {} # Clear the ID map before repopulating
+        self._treeview_id_to_taxon_name = {} # Clear map for new results
 
         if divergence_data:
              # Get columns from the keys of the first taxon's data
@@ -804,109 +836,303 @@ class SequenceConcatenatorApp:
              self.divergence_treeview["columns"] = dynamic_columns
              for col in dynamic_columns:
                   heading_text = col
-                  column_width = 100
+                  column_width = 100 # Default width
+                  min_width = 50 # Default minwidth (safer than 0)
                   anchor = 'center'
                   stretch = tk.NO
 
                   if col == "Taxon":
-                       column_width = 150
+                       heading_text = col
+                       # Increased initial width and minwidth for Taxon column
+                       column_width = 200
+                       min_width = 150
                        anchor = 'w'
-                       stretch = tk.YES
+                       stretch = tk.YES # Ensure this column stretches
                   elif col in ["Total score", "No of charsets"]:
+                       heading_text = col
                        column_width = 90
+                       min_width = 80 # Set minwidth close to width
                        anchor = 'e'
                        stretch = tk.NO
-                  else: # Assume it's a gene column (will use the actual gene name)
+                  else: # Assume it's a gene column
+                        heading_text = col
                         column_width = 120
+                        min_width = 100 # Set minwidth
                         anchor = 'center'
                         stretch = tk.NO
 
-
                   self.divergence_treeview.heading(col, text=heading_text, anchor=anchor)
-                  self.divergence_treeview.column(col, width=column_width, anchor=anchor, stretch=stretch)
+                  # Apply width, minwidth, and stretch
+                  self.divergence_treeview.column(col, width=column_width, minwidth=min_width, anchor=anchor, stretch=stretch)
 
 
              # Populate the table rows
+             # Sort taxons alphabetically, but put the reference taxon first
              sorted_taxons = sorted(divergence_data.keys())
+             if reference_taxon in sorted_taxons:
+                 # Remove the reference taxon and insert it at the beginning
+                 sorted_taxons.remove(reference_taxon)
+                 sorted_taxons.insert(0, reference_taxon)
+
+
+             reference_item_id = None # Variable to store the item ID of the reference taxon
+
              for taxon in sorted_taxons:
-                  taxon_data = divergence_data[taxon]
+                  taxon_data = divergence_data.get(taxon, {}) # Use .get for safety
                   values = []
 
-                  # Populate values list according to dynamic_columns order
                   for col in dynamic_columns:
                        if col == "Taxon":
                             values.append(taxon)
                        elif col == "Total score":
                             score = taxon_data.get(col, 0.0)
-                            values.append(f"{score:.2f}%")
+                            if isinstance(score, (int, float)):
+                                values.append(f"{score:.2f}%")
+                            else:
+                                values.append(str(score))
+
                        elif col == "No of charsets":
+                             # Ensure default is 0 if key missing
                             values.append(taxon_data.get(col, 0))
-                       else: # Gene columns (will be actual gene names)
+                       else: # Gene columns
                             values.append(taxon_data.get(col, "N/A"))
 
 
-                  # Insert the row, use the initial taxon name as the item ID (stable identifier)
-                  item_id = taxon # Use the taxon name as the unique item ID
-                  self.divergence_treeview.insert("", tk.END, iid=item_id, values=values)
-                  # Store the mapping from the Treeview item ID to the current taxon name
-                  self._treeview_id_to_taxon_name[item_id] = taxon # Initially, item ID == taxon name
+                  # Use the current taxon name as the unique item ID.
+                  # When the table is rebuilt, the item IDs will be the *current* names.
+                  item_id = taxon
+
+                  tags = ()
+                  if taxon == reference_taxon:
+                       tags = ('outgroup',) # Add 'outgroup' tag
+
+                  # Insert the row with the determined item_id, values, and tags
+                  inserted_id = self.divergence_treeview.insert("", tk.END, iid=item_id, values=values, tags=tags)
+                  # Store the mapping from the Treeview item ID (which is the current taxon name string) to the current taxon name.
+                  # This map is mainly used by the _on_treeview_click and _update_taxon_name logic.
+                  self._treeview_id_to_taxon_name[inserted_id] = taxon
+
+                  # If this is the reference taxon, store its new item ID (which is just the taxon name)
+                  if taxon == reference_taxon:
+                       reference_item_id = inserted_id
 
 
-        # No data case: Ensure headers are cleared
-        if not divergence_data or not self.divergence_treeview["columns"]:
-             self.divergence_treeview.heading("#0", text="")
-             self.divergence_treeview.column("#0", width=0, stretch=tk.NO)
+             # After populating, select the reference taxon row if it exists
+             if reference_item_id:
+                  # Clear any prior selection before setting the new one
+                  current_selection = self.divergence_treeview.selection()
+                  if current_selection:
+                      self.divergence_treeview.selection_remove(*current_selection)
+                  self.divergence_treeview.selection_set(reference_item_id)
+                  # Optionally scroll to the selected item if the table is large
+                  # self.divergence_treeview.see(reference_item_id)
+
+
+        # No data case: Ensure headers are cleared and columns removed
+        # Check if columns exist *after* attempting to set them
+        if not self.divergence_treeview["columns"]:
+             # Explicitly clear the main heading column (#0) if it's somehow visible without other columns
+             try:
+                  self.divergence_treeview.heading("#0", text="")
+                  self.divergence_treeview.column("#0", width=0, minwidth=0, stretch=tk.NO)
+             except tk.TclError:
+                  # This might fail if #0 wasn't there in the first place, safe to ignore
+                  pass
+
+             # Ensure all potential numbered columns are also cleared
+             # This loop might not be necessary if self.divergence_treeview["columns"] is already empty
+             # but it adds safety if columns were set but then data was empty.
+             for col_id in self.divergence_treeview.get_children(''): # This gets top-level item IDs, not column IDs. Incorrect usage.
+                  # Correct way to get column identifiers if needed, but we just rely on `self.divergence_treeview["columns"] = ()`
+                  pass # No action needed here
+
+             # The line below is the primary way to clear defined columns
              self.divergence_treeview["columns"] = ()
 
 
-    # Kept as it allows editing taxon names directly in the results table
+    # New method to trigger recalculation and display of divergence
+    def _recalculate_and_display_divergence(self):
+        """
+        Recalculates divergence based on the current _reference_taxon and updates the display.
+        This uses the stored SequenceConcatenator instance and its internal data.
+        """
+        # Ensure the backend instance and necessary data exist
+        if not self._concatenator or not self._concatenated_sequences or not self._backend_gene_info:
+            # Should not happen if on_submit ran successfully and data was stored
+            messagebox.showwarning("Recalculation Failed", "Cannot recalculate divergence. Necessary data is missing. Please re-run 'Concatenate & Analyze'.")
+            return
+
+        # Ensure the current reference taxon is still valid in the current concatenated data
+        taxons_in_concat = sorted(list(self._concatenated_sequences.keys()))
+        if not taxons_in_concat:
+             # If no taxons are left, clear everything and show warning
+             self._reference_taxon = None
+             self._divergence_data = {}
+             self._update_divergence_table_display(self._divergence_data, self._reference_taxon)
+             messagebox.showwarning("No Taxons Available", "No taxons left to calculate divergence.")
+             return
+
+        if self._reference_taxon not in taxons_in_concat:
+             # If the old reference taxon was removed or doesn't exist, revert to the first taxon
+             old_ref = self._reference_taxon
+             self._reference_taxon = taxons_in_concat[0] # Set to the new first taxon
+             if old_ref: # Only show message if there was a previous reference
+                 messagebox.showinfo("Reference Taxon Changed", f"Previous reference taxon '{old_ref}' is no longer available or not in current data. Setting reference to the first taxon: '{self._reference_taxon}'.")
+             # If old_ref was None, it means there were taxons but no initial ref (unlikely after on_submit fix)
+
+
+        try:
+             # Call the public method on the stored backend instance to recalculate divergence
+             # This method uses the data *within* the backend instance, only needing the reference taxon name
+             # The backend handles updating its internal divergence data based on the new ref taxon.
+             self._divergence_data = self._concatenator.recalculate_divergence_using_internal_data(self._reference_taxon)
+
+             # Update the divergence table display with the new data and the current reference taxon
+             self._update_divergence_table_display(self._divergence_data, self._reference_taxon)
+
+        except Exception as e:
+            messagebox.showerror("Divergence Recalculation Error", f"An error occurred while recalculating divergence:\n{e}")
+            traceback.print_exc()
+            # Optionally clear the divergence table on error
+            self._divergence_data = {}
+            self._update_divergence_table_display(self._divergence_data, self._reference_taxon)
+
+
+    # New method triggered by the "Make Outgroup" button
+    def make_selected_taxon_outgroup(self):
+         """Sets the selected taxon in the divergence table as the outgroup (reference taxon)."""
+         selected_items = self.divergence_treeview.selection()
+         if not selected_items:
+              messagebox.showwarning("Warning", "Please select a taxon in the table to make it the outgroup.")
+              return
+         if len(selected_items) > 1:
+              messagebox.showwarning("Warning", "Please select only one taxon to make it the outgroup.")
+              return
+
+         selected_item_id = selected_items[0]
+         # Get the taxon name using the map, which stores the current name associated with the item ID
+         # With iid being the current name, the map should just return the iid itself.
+         selected_taxon_name = self._treeview_id_to_taxon_name.get(selected_item_id, None)
+
+         # Add a fallback to get the name directly from the Treeview if the map fails for some reason
+         if selected_taxon_name is None:
+              try:
+                   # Assuming the taxon name is always the first value in the row
+                   item_values = self.divergence_treeview.item(selected_item_id, 'values')
+                   if item_values:
+                        selected_taxon_name = item_values[0]
+                        print(f"Warning: _treeview_id_to_taxon_name map missing entry for item '{selected_item_id}'. Using Treeview value '{selected_taxon_name}' as fallback.", file=sys.stderr)
+                   else:
+                        raise IndexError("No values found for item.")
+              except (IndexError, tk.TclError):
+                   messagebox.showerror("Internal Error", "Could not retrieve selected taxon name from selected item.")
+                   return
+
+
+         # Ensure the selected taxon name is actually present in the concatenated data keys
+         if not self._concatenated_sequences or selected_taxon_name not in self._concatenated_sequences:
+              messagebox.showwarning("Invalid Selection", f"Selected taxon '{selected_taxon_name}' is not a valid taxon in the concatenated data.")
+              # Clear selection as it's invalid
+              self.divergence_treeview.selection_remove(selected_item_id)
+              return
+
+         # Check if it's already the outgroup
+         if selected_taxon_name == self._reference_taxon:
+             # Clear selection but no recalculation needed
+             self.divergence_treeview.selection_remove(selected_item_id)
+             # messagebox.showinfo("Outgroup Selected", f"'{selected_taxon_name}' is already the current outgroup.") # Optional: inform user
+             return
+
+         # Set the new reference taxon
+         self._reference_taxon = selected_taxon_name
+
+         # Trigger recalculation and display update
+         self._recalculate_and_display_divergence()
+
+
+    # Kept as it allows editing taxon names directly in the results table, updated to handle outgroup tag
     def _on_treeview_click(self, event):
         # If there's an active editor, try to apply its change before starting a new one
         if self.entry_editor:
             self._update_taxon_name()
 
         # Identify the item and column clicked
-        item = self.divergence_treeview.identify_row(event.y)
+        item_id = self.divergence_treeview.identify_row(event.y)
         col_identifier = self.divergence_treeview.identify_column(event.x)
+
+        if not item_id or not col_identifier:
+            return # Click was not on a valid item or column
+
 
         # Find the column index from its identifier (e.g., '#1', '#2')
         try:
+             # Treeview columns start at #1 for the first data column
              col_index_in_columns_tuple = int(col_identifier.replace('#', '')) - 1
+         # Catch ValueError if it's the implicit #0 column or some other identifier
         except ValueError:
              return # Not a standard data column identifier, ignore click for editing
 
-        # Check if a valid row and the first column ('Taxon' column) were clicked
-        if item and col_index_in_columns_tuple == 0 and self.divergence_treeview["columns"] and self.divergence_treeview["columns"][col_index_in_columns_tuple] == "Taxon":
 
-            bbox = self.divergence_treeview.bbox(item, col_identifier)
-            if not bbox: return
+        # Check if the first column ('Taxon' column) was clicked
+        # Ensure columns exist first
+        if self.divergence_treeview["columns"] and col_index_in_columns_tuple >= 0 and col_index_in_columns_tuple < len(self.divergence_treeview["columns"]):
+             clicked_column_name = self.divergence_treeview["columns"][col_index_in_columns_tuple]
 
-            # Get the current taxon name using the map
-            current_value = self._treeview_id_to_taxon_name.get(item, self.divergence_treeview.item(item, 'values')[0])
+             if clicked_column_name == "Taxon":
+                  bbox = self.divergence_treeview.bbox(item_id, col_identifier)
+                  if not bbox: return
 
-            self.entry_item = item
-            self.entry_column = col_index_in_columns_tuple
+                  # Get the current taxon name associated with this item ID from the map
+                  current_value = self._treeview_id_to_taxon_name.get(item_id, None)
 
-            self._create_entry_widget(bbox, current_value)
+                  # Fallback if map lookup fails (shouldn't happen with current logic, but safer)
+                  if current_value is None:
+                       try:
+                            current_value = self.divergence_treeview.item(item_id, 'values')[col_index_in_columns_tuple]
+                            print(f"Warning: _treeview_id_to_taxon_name map lookup failed for iid '{item_id}'. Using Treeview value '{current_value}' as fallback.", file=sys.stderr)
+                       except (IndexError, tk.TclError):
+                            print(f"Error: Could not get value from Treeview item '{item_id}', column '{col_identifier}'. Cannot start editor.", file=sys.stderr)
+                            return # Cannot proceed
+
+                  self.entry_item = item_id # Store the item ID
+                  self.entry_column = col_index_in_columns_tuple # Store the column index
+
+                  self._create_entry_widget(bbox, current_value)
+
 
     # Kept as it's part of the taxon renaming functionality
     def _create_entry_widget(self, bbox, initial_value):
         x, y, width, height = bbox
 
+        # Destroy any existing editor before creating a new one
         if self.entry_editor:
-             self.entry_editor.destroy()
-             self.entry_editor = None
+             self._update_taxon_name() # Attempt to save changes of the previous editor
 
         self.entry_editor = tk.Entry(self.divergence_treeview, font=self.font_normal)
         self.entry_editor.insert(0, initial_value)
 
+        # Bind events
         self.entry_editor.bind("<Return>", lambda event: self._update_taxon_name())
         self.entry_editor.bind("<Escape>", lambda event: self._cancel_edit())
+        # Use a short delay for FocusOut to allow clicking buttons/other widgets before losing focus
+        # However, binding FocusOut can sometimes interfere with other clicks.
+        # A simple FocusOut bind is usually okay if it just saves. Let's keep the direct bind.
         self.entry_editor.bind("<FocusOut>", lambda event: self._update_taxon_name())
 
-        self.entry_editor.place(x=x, y=y, width=width, height=height, anchor='nw')
+
+        # Place the editor widget
+        # Need to get the absolute coordinates of the Treeview widget to place the Entry widget correctly on top of it
+        treeview_x = self.divergence_treeview.winfo_rootx()
+        treeview_y = self.divergence_treeview.winfo_rooty()
+        widget_x = treeview_x + x
+        widget_y = treeview_y + y
+
+        # Place relative to the Treeview widget itself
+        self.entry_editor.place(in_=self.divergence_treeview, x=x, y=y, width=width, height=height)
+
         self.entry_editor.focus_set()
         self.entry_editor.select_range(0, tk.END)
+
 
     # Kept as it's part of the taxon renaming functionality
     def _cancel_edit(self):
@@ -917,59 +1143,99 @@ class SequenceConcatenatorApp:
               self.entry_item = None
               self.entry_column = None
 
-    # Kept as it's part of the taxon renaming functionality
+    # Kept as it's part of the taxon renaming functionality, updated to handle outgroup tag
     def _update_taxon_name(self):
-        if not self.entry_editor:
-            return
+        if not self.entry_editor or self.entry_item is None or self.entry_column is None:
+            return # No active editor or missing state
 
         new_name = self.entry_editor.get().strip()
-        item = self.entry_item
+        item_id_being_edited = self.entry_item
         col_index = self.entry_column
 
-        old_name = self._treeview_id_to_taxon_name.get(item)
-        if old_name is None:
-             print(f"Error: Map entry not found for item ID '{item}'. Using Treeview value as fallback.", file=sys.stderr)
-             old_name = self.divergence_treeview.item(item, 'values')[col_index]
+        # Get the old name using the stored item_id from the map
+        old_name = self._treeview_id_to_taxon_name.get(item_id_being_edited)
 
         # Destroy the editor immediately
         self.entry_editor.destroy()
         self.entry_editor = None
-        self.entry_item = None
-        self.entry_column = None
+        self.entry_item = None # Clear state after processing
+        self.entry_column = None # Clear state after processing
 
+
+        if not old_name:
+             print(f"Error: Could not retrieve old taxon name from map for item ID '{item_id_being_edited}'. Aborting rename.", file=sys.stderr)
+             messagebox.showerror("Internal Error", "Could not identify the taxon being edited.")
+             return
+
+        # If the name is empty or unchanged, just exit after destroying the editor
         if not new_name:
             messagebox.showwarning("Invalid Name", "Taxon name cannot be empty.")
             return
         if new_name == old_name:
             return
 
+        # Check for duplicate names against the current keys in concatenated sequences (the source of truth)
         current_taxon_names = set(self._concatenated_sequences.keys()) if self._concatenated_sequences else set()
+        # Temporarily remove the old name from the set for the duplicate check
         if old_name in current_taxon_names:
-            current_taxon_names.remove(old_name)
+             current_taxon_names.remove(old_name)
 
         if new_name in current_taxon_names:
             messagebox.showwarning("Duplicate Name", f"A taxon named '{new_name}' already exists.")
             return
 
-        # Update internal data structures
+        # --- Update Internal Data Structures ---
+        # Update concatenated sequences dictionary keys
         if self._concatenated_sequences and old_name in self._concatenated_sequences:
              seq = self._concatenated_sequences.pop(old_name)
              self._concatenated_sequences[new_name] = seq
+             # Update __all_taxons in the backend instance if it exists, as it derives from this
+             # WARNING: Directly accessing internal backend attributes is risky.
+             # A public method in SequenceConcatenator to signal a rename would be better.
+             if self._concatenator:
+                  try:
+                       current_backend_taxons = sorted(list(self._concatenated_sequences.keys()))
+                       self._concatenator._SequenceConcatenator__all_taxons = current_backend_taxons
+                       # Also update the taxon order which might be cached internally
+                       if hasattr(self._concatenator, '_taxon_order'):
+                           self._concatenator._taxon_order = current_backend_taxons
+                  except AttributeError:
+                       print("Warning: Could not update internal backend taxon list/order.", file=sys.stderr)
 
+
+        # Update divergence data dictionary keys
+        # Divergence data should be recalculated, but the dictionary structure itself needs the new key
         if self._divergence_data and old_name in self._divergence_data:
+             # Save the data associated with the old name
              data = self._divergence_data.pop(old_name)
+             # Add the data back using the new name as the key
              self._divergence_data[new_name] = data
 
-        # Update the map
-        self._treeview_id_to_taxon_name[item] = new_name
 
-        # Update the Treeview cell value
-        current_values = list(self.divergence_treeview.item(item, 'values'))
-        if current_values:
-            current_values[0] = new_name
-            self.divergence_treeview.item(item, values=current_values)
-        else:
-             print(f"Warning: Could not update Treeview item values for item ID '{item}'.")
+        # Also update the reference taxon name if the renamed taxon was the reference
+        if self._reference_taxon == old_name:
+             self._reference_taxon = new_name
+
+
+        # --- Update Treeview and Map ---
+        # The easiest way to update the Treeview display and the internal map
+        # after keys in _concatenated_sequences and _divergence_data have changed
+        # is to clear and repopulate the Treeview. This is handled by
+        # _update_divergence_table_display, which rebuilds based on the
+        # *current* state of _divergence_data and sets item IDs to the *current* names.
+        # The map _treeview_id_to_taxon_name is cleared and rebuilt within this function.
+
+        # Recalculate divergence if the *reference* taxon name changed.
+        # If a non-reference taxon was renamed, the divergence values relative
+        # to the current reference don't change, but the row needs to show the new name.
+        # Calling _recalculate_and_display_divergence handles both cases:
+        # 1. If _reference_taxon changed, it recalculates values via the backend.
+        # 2. It always calls _update_divergence_table_display which rebuilds the UI
+        #    and the map using the latest data (with the new name).
+        self._recalculate_and_display_divergence()
+
+        # No explicit treeview item update needed here because _recalculate_and_display_divergence
+        # (which calls _update_divergence_table_display) rebuilds the table.
 
 
     # Removed as the toolbar buttons that called it are removed
@@ -987,24 +1253,34 @@ class SequenceConcatenatorApp:
             text_widget.delete("1.0", tk.END)
             text_widget.config(state="disabled")
 
+        # Clear Treeview columns and data
         if self.divergence_treeview["columns"]:
              self.divergence_treeview["columns"] = ()
         self.divergence_treeview.delete(*self.divergence_treeview.get_children())
-        self._treeview_id_to_taxon_name = {}
+        self._treeview_id_to_taxon_name = {} # Clear map
 
+        # Clear stored results
         self._concatenated_sequences = None
+        self._concatenator = None # Clear the backend instance
+        self._backend_gene_info = None
         self._partition_data = None
         self._statistics = None
         self._divergence_data = None
+        self._reference_taxon = None
 
 
     # Kept as it's triggered by the "Reset All" button on the Input tab
     def on_reset(self):
         """Resets the input (genes list) and clears results."""
-        if self.gene_names or self.raw_gene_contents or self._concatenated_sequences is not None:
+        # Check if there is anything to reset before asking
+        if self.gene_names or self.raw_gene_contents or self._concatenated_sequences is not None or self._divergence_data is not None:
             confirm = messagebox.askyesno("Confirm Reset", "Are you sure you want to remove all loaded genes and clear results?")
             if not confirm:
                 return
+        else:
+             # Nothing to reset, just return
+             return
+
 
         self.gene_names = []
         self.raw_gene_contents = []
@@ -1012,7 +1288,7 @@ class SequenceConcatenatorApp:
 
         self.clear_results_display()
 
-    # Restored as requested by the latest image/instruction
+    # Restored as requested
     def export_fasta(self):
         """Exports the concatenated sequences to a FASTA file using current taxon names."""
         if not self._concatenated_sequences:
@@ -1035,7 +1311,8 @@ class SequenceConcatenatorApp:
                 for taxon in sorted_taxons:
                     sequence = self._concatenated_sequences[taxon]
                     # Simple cleaning for FASTA header (remove leading/trailing whitespace)
-                    clean_taxon_header = taxon.strip()
+                    # Also replace any characters that might cause issues in FASTA header lines like >
+                    clean_taxon_header = re.sub(r'[>\s]', '_', taxon.strip()) # Replace > and whitespace with underscore
                     f.write(f">{clean_taxon_header}\n")
                     wrapped_seq = '\n'.join([sequence[i:i+60] for i in range(0, len(sequence), 60)])
                     f.write(f"{wrapped_seq}\n")
@@ -1045,7 +1322,7 @@ class SequenceConcatenatorApp:
             messagebox.showerror("Export Error", f"Could not save FASTA file:\n{e}")
             traceback.print_exc()
 
-    # Restored as requested by the latest image/instruction
+    # Restored as requested
     def export_partition(self):
         """Exports the partition data to a NEXUS formatted file (partition block only)."""
         # Need partition data AND concatenated sequences (for NTAX/NCHAR)
@@ -1204,7 +1481,7 @@ class SequenceConcatenatorApp:
             messagebox.showerror("Export Error", f"Could not save partition file:\n{e}")
             traceback.print_exc()
 
-    # Restored as requested by the latest image/instruction
+    # Restored as requested
     def export_full_nexus(self):
         """Exports the concatenated sequences and partition data to a full NEXUS file using current taxon names."""
         if not self._concatenated_sequences or not self._partition_data:
